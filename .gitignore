@@ -1,0 +1,62 @@
+# -----------------------
+# Python / Odoo
+# -----------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.log
+*.pid
+
+# Python Virtual Environment
+venv/
+.venv/
+env/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Odoo
+filestore/
+.sessions/
+
+# -----------------------
+# Node / Expo
+# -----------------------
+node_modules/
+
+.expo/
+.expo-shared/
+
+# Metro
+.metro-health-check*
+
+# TypeScript
+*.tsbuildinfo
+
+# React Native / Expo Native
+android/.gradle/
+android/build/
+android/app/build/
+
+ios/build/
+ios/Pods/
+
+# -----------------------
+# Build
+# -----------------------
+dist/
+build/
+
+# -----------------------
+# IDE
+# -----------------------
+.vscode/
+.idea/
+
+# -----------------------
+# OS
+# -----------------------
+.DS_Store
+Thumbs.db
