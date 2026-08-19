@@ -2074,92 +2074,188 @@
         try {
             clearReplay();
             isReplayMode = true;
+
+            const formatDateTimeTo12h = (dateTimeStr) => {
+                if (!dateTimeStr) return "";
+                try {
+                    const parts = dateTimeStr.split(' ');
+                    if (parts.length < 2) return dateTimeStr;
+                    const datePart = parts[0];
+                    const timePart = parts[1];
+                    const timeParts = timePart.split(':');
+                    if (timeParts.length < 2) return dateTimeStr;
+                    
+                    let hours = parseInt(timeParts[0], 10);
+                    const minutes = timeParts[1];
+                    const seconds = timeParts[2] || "00";
+                    
+                    const ampm = hours >= 12 ? 'PM' : 'AM';
+                    hours = hours % 12;
+                    hours = hours ? hours : 12;
+                    const strHours = String(hours).padStart(2, '0');
+                    
+                    return `${datePart} ${strHours}:${minutes}:${seconds} ${ampm}`;
+                } catch (e) {
+                    return dateTimeStr;
+                }
+            };
         
         // Let the general filterDevices handle which live tracking markers should be visible on map
         const term = document.getElementById('device_search')?.value.toLowerCase() || '';
         filterDevices(term);
 
-        // Detect stops using same logic as traccar.device.stop model:
-        // 1. Group consecutive positions with speed < 2 km/h
-        // 2. Merge adjacent groups if gap <= 5 min AND distance <= 150m
-        // 3. Only keep stops with duration >= 1 minute (for display on map)
+        // Detect stops using a combined spatial (distance <= 40m) and speed check:
         const compressedRoute = [];
         const waitingPoints = [];
         let calculatedDistanceVal = 0;
 
-        // Step 1: Group consecutive low-speed positions
-        const rawStopGroups = [];
+        const stopGroups = [];
         let currentGroup = [];
+        
         for (let i = 0; i < positions.length; i++) {
-            const speed = positions[i].speed_kmh || 0;
-            if (speed < 2.0) {
-                currentGroup.push(positions[i]);
-            } else {
-                if (currentGroup.length > 0) {
-                    rawStopGroups.push([...currentGroup]);
-                    currentGroup = [];
-                }
-                compressedRoute.push(positions[i]);
-            }
-        }
-        if (currentGroup.length > 0) {
-            rawStopGroups.push([...currentGroup]);
-        }
-
-        // Step 2: Merge adjacent groups if gap <= 5 min AND distance <= 150m
-        const mergedGroups = [];
-        for (const grp of rawStopGroups) {
-            if (mergedGroups.length === 0) {
-                mergedGroups.push(grp);
-            } else {
-                const lastGrp = mergedGroups[mergedGroups.length - 1];
-                const lastEnd = lastGrp[lastGrp.length - 1];
-                const currStart = grp[0];
-
-                const parseTime = (t) => new Date(t.device_time.includes('Z') || t.device_time.includes('UTC') ? t.device_time : t.device_time.replace(' ', 'T') + 'Z');
-                const gapMs = parseTime(currStart) - parseTime(lastEnd);
-                const gapMinutes = gapMs / 60000;
-
-                const lastMid = lastGrp[Math.floor(lastGrp.length / 2)];
-                const currMid = grp[Math.floor(grp.length / 2)];
-                const distMeters = calculateDistance(lastMid.latitude, lastMid.longitude, currMid.latitude, currMid.longitude) * 1000;
-
-                if (gapMinutes <= 5.0 && distMeters <= 150.0) {
-                    mergedGroups[mergedGroups.length - 1] = mergedGroups[mergedGroups.length - 1].concat(grp);
-                } else {
-                    mergedGroups.push(grp);
-                }
-            }
-        }
-
-        // Step 3: Build waiting points from merged groups
-        for (const grp of mergedGroups) {
-            if (grp.length < 2) {
-                compressedRoute.push(grp[0]);
+            const p = positions[i];
+            if (i === 0) {
+                compressedRoute.push(p);
                 continue;
             }
-            const startPt = grp[0];
-            const endPt = grp[grp.length - 1];
+            
+            const prev = positions[i - 1];
+            // Calculate distance between consecutive positions
+            const distMeters = calculateDistance(prev.latitude, prev.longitude, p.latitude, p.longitude) * 1000;
+            const speed = p.speed_kmh || 0;
+            
+            // They are moving if they traveled more than 40 meters since the last update OR speed >= 2 km/h
+            const isMoving = distMeters > 40 || speed >= 2.0;
+            
+            if (!isMoving) {
+                currentGroup.push(p);
+            } else {
+                if (currentGroup.length > 0) {
+                    const startPt = currentGroup[0];
+                    const endPt = currentGroup[currentGroup.length - 1];
+                    const parsedStart = new Date(startPt.device_time.includes('Z') || startPt.device_time.includes('UTC') ? startPt.device_time : startPt.device_time.replace(' ', 'T') + 'Z');
+                    const parsedEnd = new Date(endPt.device_time.includes('Z') || endPt.device_time.includes('UTC') ? endPt.device_time : endPt.device_time.replace(' ', 'T') + 'Z');
+                    const durationMs = parsedEnd - parsedStart;
+                    
+                    if (durationMs >= 60000) { // stopped for >= 1 minute
+                        stopGroups.push([...currentGroup]);
+                    } else {
+                        compressedRoute.push(...currentGroup);
+                    }
+                    currentGroup = [];
+                }
+                compressedRoute.push(p);
+            }
+        }
+        
+        if (currentGroup.length > 0) {
+            const startPt = currentGroup[0];
+            const endPt = currentGroup[currentGroup.length - 1];
             const parsedStart = new Date(startPt.device_time.includes('Z') || startPt.device_time.includes('UTC') ? startPt.device_time : startPt.device_time.replace(' ', 'T') + 'Z');
             const parsedEnd = new Date(endPt.device_time.includes('Z') || endPt.device_time.includes('UTC') ? endPt.device_time : endPt.device_time.replace(' ', 'T') + 'Z');
             const durationMs = parsedEnd - parsedStart;
-
-            if (durationMs >= 60000) { // >= 1 minute
-                const midPt = grp[Math.floor(grp.length / 2)];
-                waitingPoints.push({
-                    latitude: midPt.latitude,
-                    longitude: midPt.longitude,
-                    startTime: startPt.device_time,
-                    endTime: endPt.device_time,
-                    pointCount: grp.length
-                });
+            
+            if (durationMs >= 60000) {
+                stopGroups.push([...currentGroup]);
+            } else {
+                compressedRoute.push(...currentGroup);
             }
-            // Add representative point to compressed route
-            compressedRoute.push(startPt);
         }
 
-        if (compressedRoute.length === 0 && positions.length > 0) {
-            compressedRoute.push(positions[0]);
+        // Add stops as waiting points and keep ONLY the average center point of each stop group
+        const tempWaitingPoints = [];
+        for (const grp of stopGroups) {
+            const startPt = grp[0];
+            const endPt = grp[grp.length - 1];
+            
+            // Calculate center of stop
+            let sumLat = 0, sumLon = 0;
+            grp.forEach(pt => { sumLat += pt.latitude; sumLon += pt.longitude; });
+            const avgLat = sumLat / grp.length;
+            const avgLon = sumLon / grp.length;
+            
+            tempWaitingPoints.push({
+                latitude: avgLat,
+                longitude: avgLon,
+                startTime: startPt.device_time,
+                endTime: endPt.device_time,
+                pointCount: grp.length
+            });
+        }
+
+        // Merge waiting points that are within 80 meters of each other
+        const finalWaitingPoints = [];
+        tempWaitingPoints.forEach(wp => {
+            const closeWp = finalWaitingPoints.find(m => {
+                const dist = calculateDistance(m.latitude, m.longitude, wp.latitude, wp.longitude) * 1000;
+                return dist <= 80; // 80 meters threshold to group nearby drift stops
+            });
+            
+            if (closeWp) {
+                const totalPoints = closeWp.pointCount + wp.pointCount;
+                closeWp.latitude = (closeWp.latitude * closeWp.pointCount + wp.latitude * wp.pointCount) / totalPoints;
+                closeWp.longitude = (closeWp.longitude * closeWp.pointCount + wp.longitude * wp.pointCount) / totalPoints;
+                
+                const parseTime = (t) => new Date(t.includes('Z') || t.includes('UTC') ? t : t.replace(' ', 'T') + 'Z');
+                if (parseTime(wp.startTime) < parseTime(closeWp.startTime)) closeWp.startTime = wp.startTime;
+                if (parseTime(wp.endTime) > parseTime(closeWp.endTime)) closeWp.endTime = wp.endTime;
+                
+                closeWp.pointCount = totalPoints;
+            } else {
+                finalWaitingPoints.push({ ...wp });
+            }
+        });
+
+        // Reconstruct the route path (cleanedPositions) by filtering out all raw points
+        // that fall inside any of the final waiting point time windows, and replacing them
+        // with a single center point for that stop to keep the line connected.
+        const cleanedPositions = [];
+        const processedStops = new Set();
+        
+        for (let i = 0; i < positions.length; i++) {
+            const p = positions[i];
+            const pTime = new Date(p.device_time.includes('Z') || p.device_time.includes('UTC') ? p.device_time : p.device_time.replace(' ', 'T') + 'Z').getTime();
+            
+            let stopIndex = -1;
+            for (let j = 0; j < finalWaitingPoints.length; j++) {
+                const wp = finalWaitingPoints[j];
+                const wpStart = new Date(wp.startTime.includes('Z') || wp.startTime.includes('UTC') ? wp.startTime : wp.startTime + ' UTC').getTime();
+                const wpEnd = new Date(wp.endTime.includes('Z') || wp.endTime.includes('UTC') ? wp.endTime : wp.endTime + ' UTC').getTime();
+                
+                if (pTime >= wpStart && pTime <= wpEnd) {
+                    stopIndex = j;
+                    break;
+                }
+            }
+            
+            if (stopIndex === -1) {
+                cleanedPositions.push(p);
+            } else {
+                if (!processedStops.has(stopIndex)) {
+                    processedStops.add(stopIndex);
+                    const wp = finalWaitingPoints[stopIndex];
+                    cleanedPositions.push({
+                        latitude: wp.latitude,
+                        longitude: wp.longitude,
+                        device_time: wp.startTime,
+                        speed_kmh: 0,
+                        course: p.course
+                    });
+                }
+            }
+        }
+
+        // Update global waitingPoints array
+        waitingPoints.length = 0;
+        waitingPoints.push(...finalWaitingPoints);
+
+        // Sort cleanedPositions by time to keep chronological order
+        cleanedPositions.sort((a, b) => {
+            return new Date(a.device_time.replace(' ', 'T')) - new Date(b.device_time.replace(' ', 'T'));
+        });
+
+        if (cleanedPositions.length === 0 && positions.length > 0) {
+            cleanedPositions.push(positions[0]);
         }
 
         // Calculate total distance using raw positions to be accurate, filtering out GPS drift (speed <= 2)
@@ -2173,7 +2269,7 @@
             }
         }
 
-        playbackPositions = compressedRoute;
+        playbackPositions = cleanedPositions;
 
         // Show playback UI and center car button
         document.getElementById('playback_container').classList.remove('d-none');
@@ -2209,47 +2305,52 @@
             }
         }
         
-        // Add Direction Arrows only for MOVING positions outside stop zones
+        // Draw direction arrows at every position along the route
         playbackPositions.forEach((p, index) => {
-            if (index > 0 && index < playbackPositions.length - 1) {
-                const speed = p.speed_kmh || 0;
-                if (speed < 2) return; // Skip arrows for clearly stopped positions
-                
-                // Skip arrows whose timestamp falls within a waiting/stop period (GPS drift during stops)
-                const pTime = new Date(p.device_time.includes('Z') || p.device_time.includes('UTC') ? p.device_time : p.device_time.replace(' ', 'T') + 'Z').getTime();
-                const isDuringStop = waitingPoints.some(wp => {
-                    const wpStart = new Date(wp.startTime.includes('Z') || wp.startTime.includes('UTC') ? wp.startTime : wp.startTime + ' UTC').getTime();
-                    const wpEnd = new Date(wp.endTime.includes('Z') || wp.endTime.includes('UTC') ? wp.endTime : wp.endTime + ' UTC').getTime();
-                    if (pTime >= wpStart && pTime <= wpEnd) {
-                        return true;
-                    }
-                    // Also filter out points within 80 meters of this stop to catch spatial drift near stops
-                    const distToStop = calculateDistance(p.latitude, p.longitude, wp.latitude, wp.longitude) * 1000;
-                    if (distToStop <= 20) {
-                        return true;
-                    }
-                    return false;
-                });
-                if (isDuringStop) return;
-                
-                const rotation = p.course || 0;
-                const speedColor = getSpeedColor(speed);
-                
-                const arrowIcon = L.divIcon({
-                    className: 'replay-arrow',
-                    html: `<div style="transform: rotate(${rotation}deg); color: ${speedColor};">
-                             <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                                <path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/>
-                             </svg>
-                           </div>`,
-                    iconSize: [20, 20],
-                    iconAnchor: [10, 10]
-                });
-                L.marker([p.latitude, p.longitude], { 
-                    icon: arrowIcon,
-                    interactive: false 
-                }).addTo(replayPolyline);
-            }
+            const speed = p.speed_kmh || 0;
+            const rotation = p.course || 0;
+            const speedColor = getSpeedColor(speed);
+            
+            const arrowIcon = L.divIcon({
+                className: 'replay-arrow',
+                html: `<div style="transform: rotate(${rotation}deg); color: ${speedColor}; display: flex; align-items: center; justify-content: center;">
+                         <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/>
+                         </svg>
+                       </div>`,
+                iconSize: [16, 16],
+                iconAnchor: [8, 8]
+            });
+            
+            const arrowMarker = L.marker([p.latitude, p.longitude], { 
+                icon: arrowIcon,
+                interactive: true 
+            });
+            
+            arrowMarker.bindPopup(`
+                <div class="traccar-popup">
+                    <div class="popup-header" style="background: linear-gradient(135deg, #1e3a8a, #3b82f6); color: white; padding: 8px 12px; border-top-left-radius: 4px; border-top-right-radius: 4px; display: flex; align-items: center; justify-content: space-between;">
+                        <strong><i class="fa fa-map-marker"></i> Position #${index + 1}</strong>
+                        <span style="background: rgba(255,255,255,0.2); padding: 1px 6px; border-radius: 10px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Replay</span>
+                    </div>
+                    <div class="popup-body" style="padding: 10px 12px; font-size: 12px; line-height: 1.4; background: white;">
+                         <div style="margin-bottom: 6px; display: flex; align-items: center; gap: 8px;">
+                             <i class="fa fa-clock-o" style="color: #2563eb; width: 14px; text-align: center;"></i>
+                             <span><strong>Time:</strong> ${formatDateTimeTo12h(p.device_time)}</span>
+                         </div>
+                         <div style="margin-bottom: 6px; display: flex; align-items: center; gap: 8px;">
+                             <i class="fa fa-tachometer" style="color: ${speed > 0 ? '#16a34a' : '#ef4444'}; width: 14px; text-align: center;"></i>
+                             <span><strong>Speed:</strong> <span style="font-weight: 700; color: ${speed > 0 ? '#16a34a' : '#dc2626'};">${speed.toFixed(1)} km/h</span></span>
+                         </div>
+                         <div style="display: flex; align-items: center; gap: 8px;">
+                             <i class="fa fa-compass" style="color: #7c3aed; width: 14px; text-align: center;"></i>
+                             <span><strong>Coords:</strong> <span style="font-family: monospace;">${p.latitude.toFixed(6)}°, ${p.longitude.toFixed(6)}°</span></span>
+                         </div>
+                    </div>
+                </div>
+            `);
+            
+            arrowMarker.addTo(replayPolyline);
         });
 
         // Zoom to route
