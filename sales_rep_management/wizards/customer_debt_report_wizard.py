@@ -83,7 +83,7 @@ class CustomerDebtReportWizard(models.TransientModel):
         _logger.info(f"Debt Report: Fetched {len(partners_all)} partner records from DB")
         
         # Filter for debt > 0
-        partners = partners_all.filtered(lambda p: p.total_due > 0).sorted(key=lambda p: p.total_due, reverse=True)
+        partners = partners_all.filtered(lambda p: p._get_total_due() > 0).sorted(key=lambda p: p._get_total_due(), reverse=True)
         _logger.info(f"Debt Report: Final count with debt > 0: {len(partners)}")
         
         return partners

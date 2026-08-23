@@ -13,72 +13,33 @@ class ResPartner(models.Model):
     is_cash = fields.Boolean(string='Cash Customer', default=True)
     area = fields.Char(string='Area')
 
-    total_due = fields.Monetary(
-        string='Total Due',
-        compute='_compute_total_due',
-        help="Total amount due from the customer."
-    )
     currency_id = fields.Many2one(
         'res.currency', 
         related='company_id.currency_id', 
         string='Currency'
     )
 
-    # def action_after(self):
-    #     """
-    #     Safeguard: Override action_after to prevent crashes in base_accounting_kit
-    #     when no follow-up levels are configured for the company.
-    #     """
-    #     if hasattr(super(), 'action_after'):
-    #         res = super().action_after()
-    #         return res if res is not None else 0
-    #     return 0
+    def _get_total_due(self):
+        """
+        Get total due for this partner, compatible with both Community and Enterprise.
+        - If total_due field exists (from account_followup or base_accounting_kit), use it.
+        - Otherwise, calculate from posted unpaid invoices.
+        Returns a float.
+        """
+        self.ensure_one()
+        # If total_due field exists from another module, use its value
+        if 'total_due' in self._fields:
+            return self.total_due or 0.0
 
-    @api.depends_context('company')
-    def _compute_total_due(self):
-        # Call super first to ensure other modules (like account_followup) can compute their fields
-        if hasattr(super(), '_compute_total_due'):
-            super()._compute_total_due()
-
-        has_credit = 'credit' in self.env['res.partner']._fields
-        if has_credit:
-            for partner in self:
-                # Only set if not already set by super or if we want to force our logic
-                partner.total_due = partner.credit
-            
-            # Ensure total_all_due and other fields are assigned if they exist but weren't set
-            for partner in self:
-                if 'total_all_due' in partner._fields and not partner.total_all_due:
-                    partner.total_all_due = 0.0
-                if 'total_all_overdue' in partner._fields and not partner.total_all_overdue:
-                    partner.total_all_overdue = 0.0
-                if 'total_overdue' in partner._fields and not partner.total_overdue:
-                    partner.total_overdue = 0.0
-            return
-
+        # Fallback: Calculate from account.move for pure Community without followup modules
         invoices = self.env['account.move'].sudo().search([
-            ('partner_id', 'in', self.ids),
+            ('partner_id', '=', self.id),
             ('state', '=', 'posted'),
             ('payment_state', 'in', ('not_paid', 'partial')),
             ('move_type', 'in', ('out_invoice', 'out_refund')),
             ('company_id', '=', self.env.company.id)
         ])
-        
-        partner_totals = {}
-        for inv in invoices:
-            pid = inv.partner_id.id
-            partner_totals[pid] = partner_totals.get(pid, 0.0) + inv.amount_residual_signed
-            
-        for partner in self:
-            partner.total_due = partner_totals.get(partner.id, 0.0)
-            
-            # Ensure compatibility with account_followup fields if present
-            if 'total_all_due' in partner._fields and not partner.total_all_due:
-                partner.total_all_due = partner.total_due
-            if 'total_all_overdue' in partner._fields and not partner.total_all_overdue:
-                partner.total_all_overdue = 0.0
-            if 'total_overdue' in partner._fields and not partner.total_overdue:
-                partner.total_overdue = 0.0
+        return sum(invoices.mapped('amount_residual_signed'))
 
     
     _sql_constraints = [

@@ -35,8 +35,8 @@
                                 <tr>
                                     <td><span t-field="partner.name"/></td>
                                     <td class="text-right">
-                                        <span t-field="partner.total_due" t-options="{'widget': 'monetary', 'display_currency': partner.currency_id or res_company.currency_id}"/>
-                                        <t t-set="total_debt" t-value="total_debt + partner.total_due"/>
+                                        <span t-esc="'%.2f' % partner._get_total_due()"/>
+                                        <t t-set="total_debt" t-value="total_debt + partner._get_total_due()"/>
                                     </td>
                                 </tr>
                             </t>

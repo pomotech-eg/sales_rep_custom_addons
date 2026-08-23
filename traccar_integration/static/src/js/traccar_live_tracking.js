@@ -70,6 +70,7 @@
     let routePolylineObj = null;
     let replayMarkers = [];
     let waitingPointMarkers = []; // Leaflet markers for waiting points
+    let waitingPointCircles = []; // Leaflet circles for waiting points 20m radius
     let isReplayMode = false;
     let selectedDeviceId = null;
     let filterVisitRepId = ""; // Filter visits by sales rep ID
@@ -637,6 +638,13 @@
                         marker.addTo(map);
                     } else {
                         map.removeLayer(marker);
+                    }
+                });
+                waitingPointCircles.forEach(circle => {
+                    if (show) {
+                        circle.addTo(map);
+                    } else {
+                        map.removeLayer(circle);
                     }
                 });
             };
@@ -2019,7 +2027,8 @@
                         ['device_time', '<=', to]
                     ],
                     fields: ['latitude', 'longitude', 'device_time', 'speed_kmh', 'course'],
-                    order: 'device_time asc'
+                    order: 'device_time asc',
+                    limit: 100000
                 }
             },
             id: Math.floor(Math.random() * 1000000)
@@ -2078,63 +2087,103 @@
             const formatDateTimeTo12h = (dateTimeStr) => {
                 if (!dateTimeStr) return "";
                 try {
-                    const parts = dateTimeStr.split(' ');
-                    if (parts.length < 2) return dateTimeStr;
-                    const datePart = parts[0];
-                    const timePart = parts[1];
-                    const timeParts = timePart.split(':');
-                    if (timeParts.length < 2) return dateTimeStr;
+                    let isoStr = dateTimeStr.trim();
+                    if (!isoStr.includes('T') && isoStr.includes(' ')) {
+                        isoStr = isoStr.replace(' ', 'T');
+                    }
+                    if (!isoStr.includes('Z') && !isoStr.includes('UTC') && !isoStr.includes('+')) {
+                        isoStr = isoStr + 'Z';
+                    }
+                    const date = new Date(isoStr);
+                    if (isNaN(date.getTime())) {
+                        return dateTimeStr;
+                    }
                     
-                    let hours = parseInt(timeParts[0], 10);
-                    const minutes = timeParts[1];
-                    const seconds = timeParts[2] || "00";
+                    const year = date.getFullYear();
+                    const month = String(date.getMonth() + 1).padStart(2, '0');
+                    const day = String(date.getDate()).padStart(2, '0');
+                    
+                    let hours = date.getHours();
+                    const minutes = String(date.getMinutes()).padStart(2, '0');
+                    const seconds = String(date.getSeconds()).padStart(2, '0');
                     
                     const ampm = hours >= 12 ? 'PM' : 'AM';
                     hours = hours % 12;
                     hours = hours ? hours : 12;
                     const strHours = String(hours).padStart(2, '0');
                     
-                    return `${datePart} ${strHours}:${minutes}:${seconds} ${ampm}`;
+                    return `${year}-${month}-${day} ${strHours}:${minutes}:${seconds} ${ampm}`;
                 } catch (e) {
                     return dateTimeStr;
                 }
+            };
+
+            const parseDateSafe = (dVal) => {
+                if (!dVal) return 0;
+                if (dVal instanceof Date) return dVal.getTime();
+                const dStr = String(dVal).trim();
+                let isoStr = dStr;
+                if (!isoStr.includes('T') && isoStr.includes(' ')) {
+                    isoStr = isoStr.replace(' ', 'T');
+                }
+                if (!isoStr.includes('Z') && !isoStr.includes('UTC') && !isoStr.includes('+')) {
+                    isoStr = isoStr + 'Z';
+                }
+                const parsed = new Date(isoStr);
+                return isNaN(parsed.getTime()) ? new Date(dStr).getTime() : parsed.getTime();
             };
         
         // Let the general filterDevices handle which live tracking markers should be visible on map
         const term = document.getElementById('device_search')?.value.toLowerCase() || '';
         filterDevices(term);
+ 
+        // 1. Filter out GPS jump spikes (cellular triangulation errors / teleportations)
+        const cleanRawPositions = [];
+        for (let i = 0; i < positions.length; i++) {
+            const p = positions[i];
+            if (i > 0 && i < positions.length - 1) {
+                const prev = positions[i - 1];
+                const next = positions[i + 1];
+                
+                const distPrevToCurr = calculateDistance(prev.latitude, prev.longitude, p.latitude, p.longitude) * 1000;
+                const distCurrToNext = calculateDistance(p.latitude, p.longitude, next.latitude, next.longitude) * 1000;
+                const distPrevToNext = calculateDistance(prev.latitude, prev.longitude, next.latitude, next.longitude) * 1000;
+                
+                // If a point jumps more than 150m away but the next point immediately returns to within 45m of the previous point, skip it.
+                if (distPrevToCurr > 150 && distCurrToNext > 150 && distPrevToNext < 45) {
+                    continue; 
+                }
+            }
+            cleanRawPositions.push(p);
+        }
+        positions = cleanRawPositions;
 
-        // Detect stops using a combined spatial (distance <= 40m) and speed check:
+        // Detect stops using a combined spatial (distance <= 20m from group start) and speed check:
         const compressedRoute = [];
         const waitingPoints = [];
         let calculatedDistanceVal = 0;
-
+ 
         const stopGroups = [];
         let currentGroup = [];
         
         for (let i = 0; i < positions.length; i++) {
             const p = positions[i];
-            if (i === 0) {
-                compressedRoute.push(p);
-                continue;
-            }
-            
-            const prev = positions[i - 1];
-            // Calculate distance between consecutive positions
-            const distMeters = calculateDistance(prev.latitude, prev.longitude, p.latitude, p.longitude) * 1000;
-            const speed = p.speed_kmh || 0;
-            
-            // They are moving if they traveled more than 40 meters since the last update OR speed >= 2 km/h
-            const isMoving = distMeters > 40 || speed >= 2.0;
-            
-            if (!isMoving) {
+            if (currentGroup.length === 0) {
                 currentGroup.push(p);
             } else {
-                if (currentGroup.length > 0) {
+                const groupStart = currentGroup[0];
+                // Calculate distance from the START of this potential stop group
+                const distMeters = calculateDistance(groupStart.latitude, groupStart.longitude, p.latitude, p.longitude) * 1000;
+                const speed = p.speed_kmh || 0;
+                
+                // Group points if they remain inside the 20m circle from the start of the stop and speed < 2 km/h
+                if (distMeters <= 20 && speed < 2.0) {
+                    currentGroup.push(p);
+                } else {
                     const startPt = currentGroup[0];
                     const endPt = currentGroup[currentGroup.length - 1];
-                    const parsedStart = new Date(startPt.device_time.includes('Z') || startPt.device_time.includes('UTC') ? startPt.device_time : startPt.device_time.replace(' ', 'T') + 'Z');
-                    const parsedEnd = new Date(endPt.device_time.includes('Z') || endPt.device_time.includes('UTC') ? endPt.device_time : endPt.device_time.replace(' ', 'T') + 'Z');
+                    const parsedStart = parseDateSafe(startPt.device_time);
+                    const parsedEnd = parseDateSafe(endPt.device_time);
                     const durationMs = parsedEnd - parsedStart;
                     
                     if (durationMs >= 60000) { // stopped for >= 1 minute
@@ -2142,17 +2191,16 @@
                     } else {
                         compressedRoute.push(...currentGroup);
                     }
-                    currentGroup = [];
+                    currentGroup = [p];
                 }
-                compressedRoute.push(p);
             }
         }
         
         if (currentGroup.length > 0) {
             const startPt = currentGroup[0];
             const endPt = currentGroup[currentGroup.length - 1];
-            const parsedStart = new Date(startPt.device_time.includes('Z') || startPt.device_time.includes('UTC') ? startPt.device_time : startPt.device_time.replace(' ', 'T') + 'Z');
-            const parsedEnd = new Date(endPt.device_time.includes('Z') || endPt.device_time.includes('UTC') ? endPt.device_time : endPt.device_time.replace(' ', 'T') + 'Z');
+            const parsedStart = parseDateSafe(startPt.device_time);
+            const parsedEnd = parseDateSafe(endPt.device_time);
             const durationMs = parsedEnd - parsedStart;
             
             if (durationMs >= 60000) {
@@ -2161,7 +2209,7 @@
                 compressedRoute.push(...currentGroup);
             }
         }
-
+ 
         // Add stops as waiting points and keep ONLY the average center point of each stop group
         const tempWaitingPoints = [];
         for (const grp of stopGroups) {
@@ -2182,13 +2230,31 @@
                 pointCount: grp.length
             });
         }
-
-        // Merge waiting points that are within 80 meters of each other
+ 
+        // Merge waiting points that are within 50 meters of each other, provided they never left the area (60m) in between
         const finalWaitingPoints = [];
         tempWaitingPoints.forEach(wp => {
             const closeWp = finalWaitingPoints.find(m => {
                 const dist = calculateDistance(m.latitude, m.longitude, wp.latitude, wp.longitude) * 1000;
-                return dist <= 80; // 80 meters threshold to group nearby drift stops
+                if (dist > 50) return false;
+                
+                // Temporal-spatial check: Did they ever leave the 60m radius between the end of stop A and the start of stop B?
+                const tStart = parseDateSafe(m.endTime);
+                const tEnd = parseDateSafe(wp.startTime);
+                let leftArea = false;
+                
+                for (let i = 0; i < positions.length; i++) {
+                    const p = positions[i];
+                    const pTime = parseDateSafe(p.device_time);
+                    if (pTime > tStart && pTime < tEnd) {
+                        const distFromCenter = calculateDistance(m.latitude, m.longitude, p.latitude, p.longitude) * 1000;
+                        if (distFromCenter > 60) {
+                            leftArea = true;
+                            break;
+                        }
+                    }
+                }
+                return !leftArea;
             });
             
             if (closeWp) {
@@ -2196,9 +2262,8 @@
                 closeWp.latitude = (closeWp.latitude * closeWp.pointCount + wp.latitude * wp.pointCount) / totalPoints;
                 closeWp.longitude = (closeWp.longitude * closeWp.pointCount + wp.longitude * wp.pointCount) / totalPoints;
                 
-                const parseTime = (t) => new Date(t.includes('Z') || t.includes('UTC') ? t : t.replace(' ', 'T') + 'Z');
-                if (parseTime(wp.startTime) < parseTime(closeWp.startTime)) closeWp.startTime = wp.startTime;
-                if (parseTime(wp.endTime) > parseTime(closeWp.endTime)) closeWp.endTime = wp.endTime;
+                if (parseDateSafe(wp.startTime) < parseDateSafe(closeWp.startTime)) closeWp.startTime = wp.startTime;
+                if (parseDateSafe(wp.endTime) > parseDateSafe(closeWp.endTime)) closeWp.endTime = wp.endTime;
                 
                 closeWp.pointCount = totalPoints;
             } else {
@@ -2214,13 +2279,13 @@
         
         for (let i = 0; i < positions.length; i++) {
             const p = positions[i];
-            const pTime = new Date(p.device_time.includes('Z') || p.device_time.includes('UTC') ? p.device_time : p.device_time.replace(' ', 'T') + 'Z').getTime();
+            const pTime = parseDateSafe(p.device_time);
             
             let stopIndex = -1;
             for (let j = 0; j < finalWaitingPoints.length; j++) {
                 const wp = finalWaitingPoints[j];
-                const wpStart = new Date(wp.startTime.includes('Z') || wp.startTime.includes('UTC') ? wp.startTime : wp.startTime + ' UTC').getTime();
-                const wpEnd = new Date(wp.endTime.includes('Z') || wp.endTime.includes('UTC') ? wp.endTime : wp.endTime + ' UTC').getTime();
+                const wpStart = parseDateSafe(wp.startTime);
+                const wpEnd = parseDateSafe(wp.endTime);
                 
                 if (pTime >= wpStart && pTime <= wpEnd) {
                     stopIndex = j;
@@ -2244,31 +2309,30 @@
                 }
             }
         }
-
+ 
         // Update global waitingPoints array
         waitingPoints.length = 0;
         waitingPoints.push(...finalWaitingPoints);
-
+ 
         // Sort cleanedPositions by time to keep chronological order
         cleanedPositions.sort((a, b) => {
-            return new Date(a.device_time.replace(' ', 'T')) - new Date(b.device_time.replace(' ', 'T'));
+            return parseDateSafe(a.device_time) - parseDateSafe(b.device_time);
         });
-
+ 
         if (cleanedPositions.length === 0 && positions.length > 0) {
             cleanedPositions.push(positions[0]);
         }
-
-        // Calculate total distance using raw positions to be accurate, filtering out GPS drift (speed <= 2)
-        for (let k = 0; k < positions.length - 1; k++) {
-            const p1 = positions[k];
-            const p2 = positions[k+1];
-            const speed = p1.speed_kmh || 0;
+ 
+        // Calculate total distance using cleaned positions (filtering out GPS drift, ignoring speed limits)
+        for (let k = 0; k < cleanedPositions.length - 1; k++) {
+            const p1 = cleanedPositions[k];
+            const p2 = cleanedPositions[k+1];
             const dist = calculateDistance(p1.latitude, p1.longitude, p2.latitude, p2.longitude);
-            if (speed > 2 && dist > 0.05) { // Match python report threshold of 50m (0.05 km)
+            if (dist > 0.05) { // Only count movement greater than 50 meters
                 calculatedDistanceVal += dist;
             }
         }
-
+ 
         playbackPositions = cleanedPositions;
 
         // Show playback UI and center car button
@@ -2415,6 +2479,7 @@
 
         // Add Waiting Points to Map and keep tracking reference
         waitingPointMarkers = [];
+        waitingPointCircles = [];
         const showWaitingPoints = document.getElementById('toggle_waiting_points')?.checked !== false;
 
         waitingPoints.forEach(wp => {
@@ -2427,10 +2492,21 @@
             const marker = L.marker([wp.latitude, wp.longitude], { icon: clockIcon, zIndexOffset: 2000 })
                 .bindPopup(createWaitingPopupContent(wp));
             
+            const circle = L.circle([wp.latitude, wp.longitude], {
+                radius: 20,
+                color: '#f59e0b',
+                fillColor: '#f59e0b',
+                fillOpacity: 0.15,
+                weight: 1.5,
+                dashArray: '4, 4'
+            });
+            
             if (showWaitingPoints) {
                 marker.addTo(map);
+                circle.addTo(map);
             }
             waitingPointMarkers.push(marker);
+            waitingPointCircles.push(circle);
         });
 
         function createWaitingPopupContent(wp) {
@@ -2488,7 +2564,7 @@
         isPlaying = true;
         document.getElementById('btn_play_pause').innerHTML = '<i class="fa fa-pause"></i>';
         
-        const multiplier = parseInt(document.getElementById('playback_speed_mult').value) || 1;
+        const multiplier = parseFloat(document.getElementById('playback_speed_mult').value) || 1.0;
         const interval = 1000 / (multiplier * 2); // 2 steps per second base
         
         playbackTimer = setInterval(() => {
@@ -2595,6 +2671,8 @@
         
         waitingPointMarkers.forEach(m => map.removeLayer(m));
         waitingPointMarkers = [];
+        waitingPointCircles.forEach(c => map.removeLayer(c));
+        waitingPointCircles = [];
         
         isReplayMode = false;
         

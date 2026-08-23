@@ -206,8 +206,8 @@ class ExportController(http.Controller):
         total_debt = 0.0
         for partner in partners:
             ws.cell(row=row, column=1, value=partner.name)
-            ws.cell(row=row, column=2, value=partner.total_due)
-            total_debt += partner.total_due
+            ws.cell(row=row, column=2, value=partner._get_total_due())
+            total_debt += partner._get_total_due()
             row += 1
 
         # Totals

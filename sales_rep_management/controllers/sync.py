@@ -215,7 +215,7 @@ class SyncController(http.Controller, SalesRepUtils):
             total_debt = 0.0
             
             for p in partner_records:
-                due = p.total_due
+                due = p._get_total_due()
                 if due > 0:
                     report_data.append({
                         'id': p.id,
@@ -2974,7 +2974,10 @@ class SyncController(http.Controller, SalesRepUtils):
         # Enrich with partner info (address, coords, phone)
         partner_ids = [c['partner_id'][0] for c in customers if c['partner_id']]
         # Build field list — include financial limit fields if the module is installed
-        partner_fields = ['id', 'name', 'display_name', 'street', 'city', 'state_id', 'country_id', 'area', 'phone', 'email', 'is_cash', 'visit_latitude', 'visit_longitude', 'property_product_pricelist', 'property_payment_term_id', 'credit_limit', 'total_due', 'enable_location', 'location_radius', 'mobile_local_id', 'category_id']
+        partner_fields = ['id', 'name', 'display_name', 'street', 'city', 'state_id', 'country_id', 'area', 'phone', 'email', 'is_cash', 'visit_latitude', 'visit_longitude', 'property_product_pricelist', 'property_payment_term_id', 'credit_limit', 'enable_location', 'location_radius', 'mobile_local_id', 'category_id']
+        has_total_due_field = 'total_due' in request.env['res.partner']._fields
+        if has_total_due_field:
+            partner_fields.append('total_due')
         if 'sale_credit_limit' in request.env['res.partner']._fields:
             partner_fields += ['sale_credit_limit', 'allow_over_sale_credit', 'sale_credit_used']
         partners = request.env['res.partner'].with_user(user).search_read(
@@ -2986,6 +2989,9 @@ class SyncController(http.Controller, SalesRepUtils):
             if p.get('state_id'): p['state_id'] = p['state_id'][0]
             if p.get('property_payment_term_id'): p['property_payment_term_id'] = p['property_payment_term_id'][0]
             if p.get('property_product_pricelist'): p['property_product_pricelist'] = p['property_product_pricelist'][0]
+            if not has_total_due_field:
+                partner_rec = request.env['res.partner'].browse(p['id'])
+                p['total_due'] = partner_rec._get_total_due()
         partner_map = {p['id']: p for p in partners}
             
         loyalty_map = {}
@@ -3542,7 +3548,10 @@ class SyncController(http.Controller, SalesRepUtils):
         if related_partner_ids:
              # Build field list — include financial limit fields if the module is installed
              extra_partner_fields = ['id', 'name', 'phone', 'mobile', 'email', 'street', 'city', 'state_id', 'country_id', 'area', 'vat', 
-                 'property_payment_term_id', 'property_product_pricelist', 'credit_limit', 'total_due', 'mobile_local_id', 'visit_latitude', 'visit_longitude', 'is_cash', 'category_id', 'enable_location', 'location_radius']
+                 'property_payment_term_id', 'property_product_pricelist', 'credit_limit', 'mobile_local_id', 'visit_latitude', 'visit_longitude', 'is_cash', 'category_id', 'enable_location', 'location_radius']
+             has_total_due_field_extra = 'total_due' in request.env['res.partner']._fields
+             if has_total_due_field_extra:
+                 extra_partner_fields.append('total_due')
              if 'sale_credit_limit' in request.env['res.partner']._fields:
                  extra_partner_fields += ['sale_credit_limit', 'allow_over_sale_credit', 'sale_credit_used']
              partners = request.env['res.partner'].with_user(user).search_read(
@@ -3555,6 +3564,9 @@ class SyncController(http.Controller, SalesRepUtils):
                  if p.get('state_id'): p['state_id'] = p['state_id'][0]
                  if p.get('property_payment_term_id'): p['property_payment_term_id'] = p['property_payment_term_id'][0]
                  if p.get('property_product_pricelist'): p['property_product_pricelist'] = p['property_product_pricelist'][0]
+                 if not has_total_due_field_extra:
+                     partner_rec = request.env['res.partner'].browse(p['id'])
+                     p['total_due'] = partner_rec._get_total_due()
              
              downloads['partners'] = partners
 
