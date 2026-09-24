@@ -130,7 +130,7 @@ class LoyaltyProgram(models.Model):
 
     # ── Priority & Sharing ────────────────────────────────────────────────
     priority = fields.Integer(
-        string='Priority',
+        string='Pri',
         required=True,
         index=True,
         default=lambda self: self._get_default_priority(),
